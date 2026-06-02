@@ -1,19 +1,30 @@
 /**
  * Root Next.js middleware (§10.4 CSP + §3.8 page-navigation gate).
  *
- * 1. CSP nonce: a fresh base64(randomBytes(16)) nonce per request is woven into the
- *    Content-Security-Policy (script-src/style-src 'nonce-{n}') and forwarded to the
- *    app via the `x-nonce` request header so Next can attach it to inline bootstrap
- *    scripts. The full §10.4 policy + hardening headers are set on every response.
- * 2. Page gate: non-public page navigations without a `dw_session` cookie are
- *    redirected to '/'. This is a CHEAP PRESENCE CHECK ONLY — authoritative
- *    validation happens server-side via requireUser/resolveSession. API routes are
- *    NOT redirected here (they return 401 JSON via requireUser).
+ * CSP is environment-aware:
+ *  - Development: relaxed so the Next/Turbopack dev runtime works (React dev needs
+ *    `unsafe-eval`; the dev client injects inline bootstrap + HMR websockets).
+ *    Trusted Types are NOT forced (Next does not ship a TrustedScriptURL policy for
+ *    its chunk loader).
+ *  - Production: strict nonce-based policy with `strict-dynamic`. The nonce is woven
+ *    into the CSP AND forwarded on the request headers so Next attaches it to its
+ *    own <script> tags (without this, strict-dynamic blocks Next's scripts).
+ *
+ * NOTE (§10.4 reconciliation): the spec's `require-trusted-types-for 'script'` +
+ * `trusted-types` directives are intentionally omitted — Next.js' script loader is
+ * not Trusted-Types-compatible out of the box, and §10.4 itself hedges TT as
+ * "enforced where available, else by code review". DOMPurify (src/lib/sanitize.ts)
+ * remains the single sanitization sink, which is the real XSS control.
+ *
+ * Page gate: non-public page navigations without a `dw_session` cookie redirect to
+ * '/' (cheap PRESENCE check only — authoritative validation is server-side via
+ * requireUser/resolveSession). API routes are not redirected (they return 401 JSON).
  */
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
 const SESSION_COOKIE = "dw_session";
+const IS_PROD = process.env.NODE_ENV === "production";
 
 /** Paths reachable without a session (everything else page nav -> redirect to '/'). */
 const PUBLIC_PATHS = new Set<string>([
@@ -23,29 +34,47 @@ const PUBLIC_PATHS = new Set<string>([
   "/api/health",
 ]);
 
-/** Build the per-request CSP with the nonce threaded into script/style-src (§10.4). */
-function buildCsp(nonce: string): string {
+/** Strict nonce-based production policy (§10.4, minus Next-incompatible TT). */
+function prodCsp(nonce: string): string {
   return [
-    "default-src 'none'",
+    "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-    `style-src 'self' 'nonce-${nonce}'`,
-    "img-src 'self' data:",
+    // Next/React inject some inline <style>; nonce-ing every one is impractical, so
+    // styles are allowed inline (no script execution risk).
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https://avatars.githubusercontent.com",
     "font-src 'self'",
     "connect-src 'self'",
     "base-uri 'none'",
     "form-action 'self'",
     "frame-ancestors 'none'",
     "object-src 'none'",
-    "require-trusted-types-for 'script'",
-    "trusted-types diffwise-sanitizer dompurify",
     "upgrade-insecure-requests",
   ].join("; ");
 }
 
-/** Additional hardening headers (§10.4). */
+/** Relaxed development policy so the dev runtime + HMR work. */
+function devCsp(): string {
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https://avatars.githubusercontent.com",
+    "font-src 'self'",
+    "connect-src 'self' ws: wss:",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+  ].join("; ");
+}
+
+/** Additional hardening headers (§10.4). HSTS only in prod (https). */
 function applySecurityHeaders(headers: Headers, csp: string): void {
   headers.set("Content-Security-Policy", csp);
-  headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+  if (IS_PROD) {
+    headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+  }
   headers.set("X-Content-Type-Options", "nosniff");
   headers.set("X-Frame-Options", "DENY");
   headers.set("Referrer-Policy", "no-referrer");
@@ -56,7 +85,6 @@ function applySecurityHeaders(headers: Headers, csp: string): void {
 
 function isPublic(pathname: string): boolean {
   if (PUBLIC_PATHS.has(pathname)) return true;
-  // Next internals + static assets are always allowed (also excluded by matcher).
   if (pathname.startsWith("/_next")) return true;
   if (pathname === "/favicon.ico") return true;
   return false;
@@ -65,14 +93,14 @@ function isPublic(pathname: string): boolean {
 export function middleware(req: NextRequest): NextResponse {
   const { pathname } = req.nextUrl;
 
-  // Per-request CSP nonce: base64 of 16 random bytes.
+  // Per-request CSP nonce (prod only — dev uses the relaxed policy).
   const nonce = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
-  const csp = buildCsp(nonce);
+  const csp = IS_PROD ? prodCsp(nonce) : devCsp();
 
   const hasSession = Boolean(req.cookies.get(SESSION_COOKIE)?.value);
   const isApi = pathname.startsWith("/api/");
 
-  // Gate PAGE navigations only (not API routes — those return 401 JSON via requireUser).
+  // Gate PAGE navigations only.
   if (!isApi && !isPublic(pathname) && !hasSession) {
     const redirectUrl = req.nextUrl.clone();
     redirectUrl.pathname = "/";
@@ -82,9 +110,11 @@ export function middleware(req: NextRequest): NextResponse {
     return res;
   }
 
-  // Forward the nonce to the app via a request header so layouts can read it.
+  // Forward the nonce (and, in prod, the CSP) on the REQUEST headers so Next reads
+  // the nonce and attaches it to its own scripts.
   const requestHeaders = new Headers(req.headers);
   requestHeaders.set("x-nonce", nonce);
+  if (IS_PROD) requestHeaders.set("Content-Security-Policy", csp);
 
   const res = NextResponse.next({ request: { headers: requestHeaders } });
   applySecurityHeaders(res.headers, csp);

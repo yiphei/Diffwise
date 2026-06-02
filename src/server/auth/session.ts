@@ -13,6 +13,7 @@ import { eq, lt } from "drizzle-orm";
 import { db } from "@/server/db/client";
 import { sessions, users } from "@/server/db/schema";
 import type { User } from "@/server/db/schema";
+import { env } from "@/server/config/env";
 
 export const SESSION_COOKIE = "dw_session";
 
@@ -109,12 +110,18 @@ export async function pruneExpiredSessions(): Promise<void> {
   await db.delete(sessions).where(lt(sessions.expiresAt, new Date()));
 }
 
+/** `Secure` only in production — a Secure cookie is dropped by browsers over
+ *  http://localhost, which would break local dev sign-in. */
+function secureFlag(): string[] {
+  return env.isProd ? ["Secure"] : [];
+}
+
 /** Set-Cookie for a fresh/renewed session (§3.4 cookie flags). */
 export function buildSessionCookie(raw: string): string {
   return [
     `${SESSION_COOKIE}=${raw}`,
     "HttpOnly",
-    "Secure",
+    ...secureFlag(),
     "SameSite=Lax",
     "Path=/",
     `Max-Age=${SESSION_MAX_AGE_SEC}`,
@@ -126,11 +133,24 @@ export function buildClearSessionCookie(): string {
   return [
     `${SESSION_COOKIE}=`,
     "HttpOnly",
-    "Secure",
+    ...secureFlag(),
     "SameSite=Lax",
     "Path=/",
     "Max-Age=0",
   ].join("; ");
+}
+
+/** Options object for NextResponse.cookies.set(SESSION_COOKIE, raw, ...). Prefer this
+ *  over appending a raw Set-Cookie header: a NextResponse that ALSO uses the cookies
+ *  API (e.g. cookies.delete) will drop manually-appended Set-Cookie headers. */
+export function sessionCookieOptions(): {
+  httpOnly: true;
+  secure: boolean;
+  sameSite: "lax";
+  path: "/";
+  maxAge: number;
+} {
+  return { httpOnly: true, secure: env.isProd, sameSite: "lax", path: "/", maxAge: SESSION_MAX_AGE_SEC };
 }
 
 /** Parse a single cookie value from the request's `Cookie` header (handlers don't

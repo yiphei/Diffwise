@@ -3,7 +3,12 @@ import { NextResponse } from "next/server";
 import { logger } from "@/lib/log";
 import { env } from "@/server/config/env";
 import { exchangeCodeForToken, fetchGithubUser } from "@/server/auth/githubOauth";
-import { buildSessionCookie, createSession, readCookie } from "@/server/auth/session";
+import {
+  SESSION_COOKIE,
+  createSession,
+  readCookie,
+  sessionCookieOptions,
+} from "@/server/auth/session";
 import { encrypt } from "@/server/crypto";
 import { credentialStore } from "@/server/credentials/store";
 import { db } from "@/server/db/client";
@@ -72,7 +77,9 @@ export async function GET(req: Request): Promise<Response> {
     const raw = await createSession(userId, req);
 
     const res = NextResponse.redirect(new URL("/", env.APP_BASE_URL));
-    res.headers.append("Set-Cookie", buildSessionCookie(raw));
+    // Both cookies via the SAME (cookies API) path — mixing with a raw
+    // headers.append('Set-Cookie', ...) drops the manually-appended one.
+    res.cookies.set(SESSION_COOKIE, raw, sessionCookieOptions());
     res.cookies.delete("oauth_state");
     return res;
   } catch (e) {

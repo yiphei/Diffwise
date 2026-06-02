@@ -44,13 +44,18 @@ export interface StoryApi {
 
 const StoryContext = createContext<StoryApi | null>(null);
 
+/** Stable empty reference — a selector must NOT return a fresh `[]` each call, or
+ *  zustand's Object.is check re-renders forever ("Maximum update depth exceeded"). */
+const EMPTY_BEATS: StoryBeat[] = [];
+
 /** Access the story API. Returns null when no provider is mounted. */
 export function useStory(): StoryApi | null {
   return useContext(StoryContext);
 }
 
 export function StoryProvider({ children }: { children: ReactNode }) {
-  const beats = useReviewStore((s) => s.model?.story ?? []);
+  // Select the (stable) slice ref or undefined; default OUTSIDE the selector.
+  const beats = useReviewStore((s) => s.model?.story) ?? EMPTY_BEATS;
   const active = useReviewStore((s) => s.story.active);
   const curBeat = useReviewStore((s) => s.story.beat);
   const reducedMotion = useReviewStore((s) => s.reducedMotion);

@@ -9,6 +9,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { DiffwiseError } from "@/lib/model/errors";
 import type { StageName, TokenUsage } from "@/lib/model/model";
+import { logger } from "@/lib/log";
 
 /** The single pinned model for every stage (LOCKED). */
 export const PIPELINE_MODEL = "claude-opus-4-8" as const;
@@ -22,6 +23,15 @@ export const THINKING_BUDGET: Record<StageName, number> = {
   arch: 10_000,
   story: 6_000,
 };
+
+/** Map a per-stage thinking load to an adaptive-thinking effort level.
+ *  claude-opus-4-8 uses ADAPTIVE thinking (`{type:'adaptive'}` + output_config.effort);
+ *  the legacy `{type:'enabled', budget_tokens}` shape is rejected by this model. */
+function effortFor(budget: number): "low" | "medium" | "high" {
+  if (budget <= 5_000) return "low";
+  if (budget <= 9_000) return "medium";
+  return "high";
+}
 
 /** HTTP statuses that are safe to retry (§5.7). 529 = Anthropic overloaded. */
 const RETRYABLE = new Set<number>([408, 409, 429, 500, 502, 503, 504, 529]);
@@ -167,19 +177,23 @@ export async function callStage<T>(
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     if (signal.aborted) throw new DiffwiseError("GENERATION_INTERRUPTED");
     try {
-      const message = await client.messages.create(
-        {
-          model: PIPELINE_MODEL,
-          // Thinking tokens count toward the output budget in the API.
-          max_tokens: maxOutputTokens + thinkingBudget,
-          thinking: { type: "enabled", budget_tokens: thinkingBudget },
-          tools: [tool],
-          tool_choice: { type: "tool", name: tool.name },
-          system,
-          messages: [{ role: "user", content: user }],
-        },
-        { signal },
-      );
+      // claude-opus-4-8 uses ADAPTIVE thinking; `output_config.effort` tunes depth.
+      // tool_choice must be 'auto' (a forced tool_choice is incompatible with
+      // thinking) — a single tool + "output via the tool only" reliably yields it.
+      const params = {
+        model: PIPELINE_MODEL,
+        max_tokens: maxOutputTokens + thinkingBudget, // generous output headroom
+        thinking: { type: "adaptive" },
+        output_config: { effort: effortFor(thinkingBudget) },
+        tools: [tool],
+        tool_choice: { type: "auto" },
+        system,
+        messages: [{ role: "user", content: user }],
+      } as unknown as Parameters<typeof client.messages.stream>[0];
+      // Stream internally: a non-streaming request with large max_tokens trips the
+      // SDK's ">10 minutes" guard. We assemble the final message and read its
+      // tool_use block exactly as before (this is unrelated to our server↔browser SSE).
+      const message = await client.messages.stream(params, { signal }).finalMessage();
 
       const block = message.content.find(
         (b): b is Anthropic.ToolUseBlock =>
@@ -206,6 +220,12 @@ export async function callStage<T>(
       if (err instanceof DiffwiseError) throw err;
 
       const status = statusOf(err);
+      // Surface the real upstream cause (the scrubber redacts any key-shaped text).
+      logger.warn("anthropic.callStage.error", {
+        attempt,
+        status,
+        message: err instanceof Error ? err.message.slice(0, 400) : String(err),
+      });
 
       // Fail fast on bad request / bad key (§5.7).
       if (status === 400) {

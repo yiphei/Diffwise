@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
-import { buildClearSessionCookie, destroySession, readCookie } from "@/server/auth/session";
+import {
+  SESSION_COOKIE,
+  destroySession,
+  readCookie,
+  sessionCookieOptions,
+} from "@/server/auth/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -14,6 +19,6 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
   const res = NextResponse.json({ ok: true });
-  res.headers.append("Set-Cookie", buildClearSessionCookie());
+  res.cookies.set(SESSION_COOKIE, "", { ...sessionCookieOptions(), maxAge: 0 });
   return res;
 }

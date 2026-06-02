@@ -1,0 +1,45 @@
+{
+  "name": "diffwise",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-generated semantic-zoom diff-review SaaS",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3000}",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "@octokit/plugin-retry": "^8.1.0",
+    "@octokit/plugin-throttling": "^11.0.3",
+    "@octokit/rest": "^22.0.1",
+    "ajv": "^8.20.0",
+    "drizzle-orm": "^0.45.2",
+    "isomorphic-dompurify": "^3.15.0",
+    "marked": "^18.0.4",
+    "next": "^16.2.7",
+    "pg": "^8.21.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^4.4.3",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/pg": "^8.20.0",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "drizzle-kit": "^0.31.10",
+    "eslint": "^10.4.1",
+    "eslint-config-next": "^16.2.7",
+    "typescript": "^6.0.3"
+  }
+}
